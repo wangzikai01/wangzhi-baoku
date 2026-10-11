@@ -1,41 +1,68 @@
-# Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
+# ============================================================
+# 王之宝库 —— git 忽略规则
+#
+# 原则：只提交"重新克隆下来能一模一样跑起来"的东西。
+#   ✅ 提交：源码、原生工程源码、签名密钥、配置
+#   ❌ 不提交：依赖、编译产物、打包好的 APK、机器相关路径
+# ============================================================
 
-# dependencies
+# ---------- 依赖 ----------
 node_modules/
 
-# Expo
+# ---------- Expo ----------
 .expo/
 dist/
 web-build/
 expo-env.d.ts
 
-# Native
-.kotlin/
+# ---------- 证书 ----------
+# 注意：android/app/debug.keystore 是**故意提交**的，
+# 这样换台电脑打出来的 APK 签名一样、可以直接覆盖安装升级。
+# 下面这些是 iOS 的证书，用不上。
 *.orig.*
 *.jks
 *.p8
 *.p12
 *.key
 *.mobileprovision
+*.pem
 
-# Metro
+# ---------- 原生工程里"生成的东西" ----------
+# android/ 整个是提交的（里面有手改的 AndroidManifest、gradle.properties、
+# debug.keystore，prebuild 会冲掉），但下面这些编译产物不提交。
+/android/app/build/
+/android/build/
+/android/.gradle/
+/android/.cxx/
+/android/capacitor-cordova-android-plugins/
+/android/local.properties
+/android/app/src/main/assets/index.android.bundle
+/android/app/src/main/res/drawable-mdpi/
+/android/app/src/main/res/drawable-hdpi/
+/android/app/src/main/res/drawable-xhdpi/
+/android/app/src/main/res/drawable-xxhdpi/
+/android/app/src/main/res/drawable-xxxhdpi/
+.android/
+.kotlin/
+
+# iOS 用不上
+/ios
+
+# ---------- 打包产物 ----------
+*.apk
+*.aab
+*.ipa
+
+# ---------- Metro / 调试 ----------
 .metro-health-check*
-
-# debug
 npm-debug.*
 yarn-debug.*
 yarn-error.*
 
-# macOS
+# ---------- 系统 / 编辑器 ----------
 .DS_Store
-*.pem
-
-# local env files
+Thumbs.db
 .env*.local
 
-# typescript
+# ---------- TypeScript ----------
 *.tsbuildinfo
-
-# generated native folders
-/ios
-/android
