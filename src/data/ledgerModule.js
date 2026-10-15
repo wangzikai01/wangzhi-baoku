@@ -642,6 +642,7 @@ export const LEDGER_HTML = String.raw`<!DOCTYPE html>
               <div class="fs-item" data-src="icbc">工商银行</div>
             </div>
           </div>
+
         </div>
       </div>
 
@@ -815,6 +816,9 @@ export const LEDGER_HTML = String.raw`<!DOCTYPE html>
 
       <input id="note" type="text" placeholder="备注（写清楚点，会自动判断分类）" autocomplete="off">
       <div class="note-tip">分类根据备注里的关键词自动判断，比如"外卖"→餐饮、"地铁"→交通</div>
+
+      <div class="edit-label">日期</div>
+      <button class="edit-date" id="addDate">—</button>
 
       <div class="tip" id="tip"></div>
       <button class="save" id="save">保存</button>
@@ -2059,8 +2063,10 @@ export const LEDGER_HTML = String.raw`<!DOCTYPE html>
     var today = todayStr();
     var has = recordDateSet();
     var isYear = (period === 'year');
-    // 修改记录时，高亮的是那条记录的日期；平时高亮的是当前筛选期间
-    var selDate = (pickerTarget === 'edit' && editing) ? editing.date : null;
+    // 修改记录时，高亮的是那条记录的日期；记账时高亮的是 addDate；平时高亮的是当前筛选期间
+    var selDate = (pickerTarget === 'edit' && editing) ? editing.date
+              : (pickerTarget === 'add') ? addDate
+              : null;
     var selRange = selDate ? computeRange(parseYmd(selDate), period) : getRange();
 
     title.textContent = isYear
@@ -2166,7 +2172,9 @@ export const LEDGER_HTML = String.raw`<!DOCTYPE html>
   }
 
   function openPicker() {
-    var base = (pickerTarget === 'edit' && editing) ? parseYmd(editing.date) : anchor;
+    var base = (pickerTarget === 'edit' && editing) ? parseYmd(editing.date)
+             : (pickerTarget === 'add') ? parseYmd(addDate)
+             : anchor;
     pkYear = base.getFullYear();
     pkMonth = base.getMonth();
     renderPicker();
@@ -2179,10 +2187,13 @@ export const LEDGER_HTML = String.raw`<!DOCTYPE html>
 
   // ---------- 记账弹层 ----------
   var curType = 'expense';
+  var addDate = todayStr();     // 记账时选择的日期，默认今天
 
   function openSheet() {
+    addDate = todayStr();       // 每次打开都重置为今天
     document.getElementById('amount').value = '';
     document.getElementById('note').value = '';
+    document.getElementById('addDate').textContent = addDate;
     document.getElementById('tip').textContent = '';
     document.getElementById('mask').classList.add('on');
   }
@@ -2390,6 +2401,14 @@ export const LEDGER_HTML = String.raw`<!DOCTYPE html>
       return;
     }
 
+    // 从"记一笔"进来的 → 只改记账的日期
+    if (pickerTarget === 'add') {
+      addDate = picked;
+      document.getElementById('addDate').textContent = picked;
+      closePicker();
+      return;
+    }
+
     // 平时 → 切换筛选期间
     anchor = parseYmd(picked);
     closePicker();
@@ -2484,6 +2503,10 @@ export const LEDGER_HTML = String.raw`<!DOCTYPE html>
   };
 
   document.getElementById('openAdd').onclick = openSheet;
+  document.getElementById('addDate').onclick = function () {
+    pickerTarget = 'add';       // 标记这是记账弹层的日期选择
+    openPicker();
+  };
   document.getElementById('mask').onclick = function (e) {
     if (e.target === document.getElementById('mask')) closeSheet();
   };
@@ -2506,7 +2529,7 @@ export const LEDGER_HTML = String.raw`<!DOCTYPE html>
       amount: Math.round(amount * 100) / 100,
       cat: guessCat(note, isIncome),
       note: note,
-      date: todayStr(),
+      date: addDate,        // 用用户选择的日期，而不是今天的日期
       time: nowClock()
     }));
     save(list);

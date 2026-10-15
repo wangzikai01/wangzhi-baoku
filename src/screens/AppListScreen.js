@@ -13,6 +13,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   FlatList,
+  Modal,
   Platform,
   Pressable,
   StatusBar as RNStatusBar,
@@ -30,9 +31,40 @@ import {
   markOpened,
   readModuleHtml,
   removeModule,
+  updateModuleHtml,
 } from '../storage/moduleStore';
-import { findBuiltin } from '../data/builtinModules';
+import { BUILTIN_MODULES, findBuiltin } from '../data/builtinModules';
 import { SAMPLE_MODULE_HTML, SAMPLE_MODULE_NAME } from '../data/sampleModule';
+
+// ============================================================
+// 更新源配置（改仓库/分支只需要动这里）
+//
+// 【为什么用 jsDelivr 而不是 GitHub 直链】
+//   国内直连 raw.githubusercontent.com 会失败（被墙），
+//   而 jsDelivr 在国内可以直接访问（已实测）。
+//   注意：jsDelivr 只能读取【公开】仓库。
+//
+// 【为什么更新前先请求 purge】
+//   CDN 会缓存文件（分支缓存最长 12 小时），
+//   先调 purge 接口清掉缓存，刚提交的改动才能立刻拉到。
+// ============================================================
+const REPO_OWNER = 'wangzikai01';
+const REPO_NAME = 'wangzhi-baoku';
+const REPO_BRANCH = 'main';
+const REPO_DIR = 'src/data';
+
+const CDN_PREFIX = `https://cdn.jsdelivr.net/gh/${REPO_OWNER}/${REPO_NAME}@${REPO_BRANCH}/${REPO_DIR}`;
+const PURGE_PREFIX = `https://purge.jsdelivr.net/gh/${REPO_OWNER}/${REPO_NAME}@${REPO_BRANCH}/${REPO_DIR}`;
+
+// 模块名到仓库文件名的映射
+const MODULE_FILE_MAP = {
+  '账本': 'ledgerModule.js',
+  '数独': 'sudokuModule.js',
+  '扫雷': 'minesweeperModule.js',
+  '古诗文': 'poetryModule.js',
+  '考公答题': 'examModule.js',
+  '综测记录': 'zongceModule.js',
+};
 
 const TOP_INSET =
   Platform.OS === 'android' ? RNStatusBar.currentHeight || 0 : 44;
@@ -59,6 +91,31 @@ function colorFor(name) {
 function initialFor(name) {
   const s = String(name || '').trim();
   return s ? s[0] : '?';
+}
+
+// 从 GitHub raw 文件内容中提取 HTML 部分
+// 模块文件格式：export const XXX_HTML = String.raw`...HTML...`;
+function extractHtmlFromModule(rawText) {
+  const startMarker = 'String.raw`';
+  const si = rawText.indexOf(startMarker);
+  if (si < 0) return null;
+  let pos = si + startMarker.length;
+  let out = '';
+  while (pos < rawText.length) {
+    const ch = rawText[pos];
+    if (ch === '\\') {
+      if (pos + 1 < rawText.length) {
+        const next = rawText[pos + 1];
+        if (next === '`') { out += '`'; pos += 2; continue; }
+        if (next === '\\') { out += '\\'; pos += 2; continue; }
+        out += ch; pos++; continue;
+      }
+      out += ch; pos++; continue;
+    }
+    if (ch === '`') break;
+    out += ch; pos++;
+  }
+  return out;
 }
 
 // ------------------------------------------------------------
@@ -104,6 +161,9 @@ function ModuleRow({ item, onPress, onLongPress }) {
 export default function AppListScreen({ onOpenModule, reloadToken }) {
   const [modules, setModules] = useState([]);
   const [sortKey, setSortKey] = useState('importedAt');
+  const [settingsVisible, setSettingsVisible] = useState(false);
+  const [updating, setUpdating] = useState(false);
+  const [updateLog, setUpdateLog] = useState('');
 
   // 从仓库重新读一遍（返回列表页时会因为 reloadToken 变化而重新读）
   const refresh = useCallback(() => {
@@ -151,6 +211,83 @@ export default function AppListScreen({ onOpenModule, reloadToken }) {
     addModule(SAMPLE_MODULE_NAME, SAMPLE_MODULE_HTML);
     refresh();
   }, [refresh]);
+
+  // 检查更新：从 CDN 拉取所有内置模块的最新版本
+  const handleCheckUpdate = useCallback(async () => {
+    setUpdating(true);
+    setUpdateLog('正在连接更新服务器…');
+
+    const results = [];
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const mod of BUILTIN_MODULES) {
+      const fileName = MODULE_FILE_MAP[mod.name];
+      if (!fileName) {
+        results.push(`${mod.name}: 未配置更新地址`);
+        failCount++;
+        continue;
+      }
+
+      try {
+        setUpdateLog(`正在更新 ${mod.name}…`);
+
+        // 先清 CDN 缓存（失败也继续，最多拿到旧一点的缓存）
+        try {
+          await fetch(`${PURGE_PREFIX}/${fileName}`);
+        } catch (e) {
+          // 忽略
+        }
+
+        const resp = await fetch(`${CDN_PREFIX}/${fileName}`);
+        if (!resp.ok) {
+          results.push(`${mod.name}: 服务器返回 ${resp.status}`);
+          failCount++;
+          continue;
+        }
+        const rawText = await resp.text();
+        const newHtml = extractHtmlFromModule(rawText);
+        if (!newHtml) {
+          results.push(`${mod.name}: 无法提取模块代码`);
+          failCount++;
+          continue;
+        }
+
+        // 找到本地对应的模块记录
+        const localModules = loadModules();
+        const local = localModules.find((m) => m.builtin && m.name === mod.name);
+        if (!local) {
+          results.push(`${mod.name}: 本地未安装`);
+          failCount++;
+          continue;
+        }
+
+        const result = updateModuleHtml(local.id, newHtml);
+        if (result.ok) {
+          results.push(`${mod.name}: 更新成功`);
+          successCount++;
+        } else {
+          results.push(`${mod.name}: ${result.error}`);
+          failCount++;
+        }
+      } catch (e) {
+        results.push(`${mod.name}: ${String((e && e.message) || e)}`);
+        failCount++;
+      }
+    }
+
+    setUpdateLog(results.join('\n'));
+    setUpdating(false);
+
+    if (failCount === 0) {
+      Alert.alert('更新完成', `全部 ${successCount} 个模块已更新到最新版本`);
+    } else {
+      Alert.alert(
+        '更新完成',
+        `成功 ${successCount} 个，失败 ${failCount} 个\n\n${results.join('\n')}`
+      );
+    }
+  }, []);
 
   // 打开模块
   const handleOpen = useCallback(
@@ -211,13 +348,23 @@ export default function AppListScreen({ onOpenModule, reloadToken }) {
       <View style={[styles.header, { paddingTop: TOP_INSET + spacing.md }]}>
         <Text style={styles.title}>王之宝库</Text>
 
-        <Pressable
-          onPress={handleImport}
-          hitSlop={12}
-          style={({ pressed }) => [styles.addBtn, pressed && styles.addBtnPressed]}
-        >
-          <Text style={styles.addBtnText}>＋ 导入</Text>
-        </Pressable>
+        <View style={styles.headerActions}>
+          <Pressable
+            onPress={() => setSettingsVisible(true)}
+            hitSlop={12}
+            style={({ pressed }) => [styles.settingsBtn, pressed && styles.settingsBtnPressed]}
+          >
+            <Text style={styles.settingsBtnText}>⚙</Text>
+          </Pressable>
+
+          <Pressable
+            onPress={handleImport}
+            hitSlop={12}
+            style={({ pressed }) => [styles.addBtn, pressed && styles.addBtnPressed]}
+          >
+            <Text style={styles.addBtnText}>＋ 导入</Text>
+          </Pressable>
+        </View>
       </View>
 
       {/* ② 工具栏 */}
@@ -276,6 +423,73 @@ export default function AppListScreen({ onOpenModule, reloadToken }) {
           showsVerticalScrollIndicator={false}
         />
       )}
+
+      {/* 设置弹层 */}
+      <Modal
+        visible={settingsVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setSettingsVisible(false)}
+      >
+        <Pressable
+          style={styles.modalMask}
+          onPress={() => setSettingsVisible(false)}
+        >
+          <Pressable style={styles.modalSheet} onPress={() => {}}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>设置</Text>
+              <Pressable onPress={() => setSettingsVisible(false)} hitSlop={10}>
+                <Text style={styles.modalClose}>✕</Text>
+              </Pressable>
+            </View>
+
+            <Text style={styles.modalDesc}>
+              从云端拉取所有内置模块的最新版本。{'\n'}
+              更新后需要重新打开模块才能生效。
+            </Text>
+
+            <View style={styles.modalInfo}>
+              <Text style={styles.modalInfoText}>
+                内置模块：{BUILTIN_MODULES.length} 个
+              </Text>
+            </View>
+
+            {updateLog ? (
+              <View style={styles.modalLog}>
+                <Text style={styles.modalLogText}>{updateLog}</Text>
+              </View>
+            ) : null}
+
+            <Pressable
+              onPress={handleCheckUpdate}
+              disabled={updating}
+              style={({ pressed }) => [
+                styles.modalBtn,
+                styles.modalBtnPrimary,
+                pressed && { opacity: 0.85 },
+                updating && { opacity: 0.6 },
+              ]}
+            >
+              <Text style={styles.modalBtnText}>
+                {updating ? '正在更新…' : '检查更新'}
+              </Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => {
+                setSettingsVisible(false);
+                setUpdateLog('');
+              }}
+              style={({ pressed }) => [
+                styles.modalBtn,
+                pressed && { opacity: 0.85 },
+              ]}
+            >
+              <Text style={styles.modalBtnText}>关闭</Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -316,6 +530,25 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 14,
     fontWeight: '600',
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  settingsBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#F2F3F5',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  settingsBtnPressed: {
+    opacity: 0.8,
+  },
+  settingsBtnText: {
+    fontSize: 18,
   },
 
   // ② 工具栏
@@ -453,5 +686,79 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     color: colors.accent,
+  },
+
+  // 设置弹层
+  modalMask: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    justifyContent: 'flex-end',
+  },
+  modalSheet: {
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 30,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: colors.text,
+  },
+  modalClose: {
+    fontSize: 20,
+    color: colors.subText,
+    padding: 4,
+  },
+  modalDesc: {
+    fontSize: 13,
+    color: colors.subText,
+    lineHeight: 20,
+    marginBottom: 14,
+  },
+  modalInfo: {
+    backgroundColor: '#F7F8FA',
+    borderRadius: 11,
+    padding: 11,
+    marginBottom: 14,
+  },
+  modalInfoText: {
+    fontSize: 12,
+    color: colors.subText,
+  },
+  modalLog: {
+    backgroundColor: '#F7F8FA',
+    borderRadius: 11,
+    padding: 11,
+    marginBottom: 14,
+    maxHeight: 150,
+  },
+  modalLogText: {
+    fontSize: 12,
+    color: colors.text,
+    lineHeight: 18,
+  },
+  modalBtn: {
+    height: 48,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 10,
+  },
+  modalBtnPrimary: {
+    backgroundColor: colors.accent,
+  },
+  modalBtnText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: colors.text,
   },
 });

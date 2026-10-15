@@ -150,6 +150,9 @@ export function renameModule(id, name) {
 //     id 不变 → 假域名不变 → localStorage 不变 → 数据一条不丢
 //   · 不存在 → 新建
 // 这样开发者改完代码，用户手机上立刻是新版本，而账目还在。
+//
+// 【skipSync】如果模块记录里有 skipSync=true，说明用户手动更新过，
+//   这里就不再覆盖 —— 避免下次启动把用户的更新冲掉。
 // ------------------------------------------------------------
 export function ensureBuiltinModule(name, html) {
   const list = loadModules();
@@ -157,6 +160,9 @@ export function ensureBuiltinModule(name, html) {
   const dir = getModulesDir();
 
   if (existing) {
+    // 如果用户手动更新过（skipSync），就不要用 bundled 版本覆盖
+    if (existing.skipSync) return existing;
+
     const file = new File(dir, existing.fileName);
     if (!file.exists) file.create();
     file.write(html);
@@ -186,4 +192,25 @@ export function ensureBuiltinModule(name, html) {
   list.unshift(record);
   saveModules(list);
   return record;
+}
+
+// 更新某个模块的 HTML 内容（用于从 GitHub 拉取最新版本）
+// 会设置 skipSync=true，防止下次启动时被 bundled 版本覆盖
+export function updateModuleHtml(id, html) {
+  const list = loadModules();
+  const target = list.find((m) => m.id === id);
+  if (!target) return { ok: false, error: '模块不存在' };
+
+  const dir = getModulesDir();
+  const file = new File(dir, target.fileName);
+  if (!file.exists) file.create();
+  file.write(html);
+
+  const next = list.map((m) =>
+    m.id === id
+      ? { ...m, size: file.size || 0, skipSync: true, updatedAt: todayString() }
+      : m
+  );
+  saveModules(next);
+  return { ok: true, size: file.size || 0 };
 }
